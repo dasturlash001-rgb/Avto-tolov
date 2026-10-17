@@ -1,0 +1,7 @@
+# maxfiy va ma'lumot fayllari - GitHub'ga yuklanmasin
+.env
+*.db
+*.json
+*.session
+*.log
+__pycache__/
