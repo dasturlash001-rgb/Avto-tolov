@@ -224,15 +224,65 @@ async def on_bc(bc: BusinessConnection):
     db.commit()
 
 
+async def verdict(text: str):
+    """DEBUG: hub qarorini adminga yozadi (nega ishladi / nega ishlamadi)."""
+    print("HUB:", text, flush=True)
+    if DEBUG:
+        try:
+            await bot.send_message(ADMIN_ID, "🔎 " + text)
+        except Exception:
+            pass
+
+
+def pending_report() -> str:
+    now = time.time()
+    rows = db.execute("SELECT owner_id,amount,user_id,exp FROM pending WHERE exp>? ORDER BY exp",
+                      (now,)).fetchall()
+    if not rows:
+        return "kutilayotgan to'lov yo'q (muddati o'tgan yoki hech kim summa so'ramagan)"
+    return "; ".join(f"egasi {o}: {a:,} so'm (foyd. {u}, {int(e - now)} soniya qoldi)"
+                     for o, a, u, e in rows[:10])
+
+
+@dp.message(Command("diag"))
+async def diag(m: Message):
+    """Admin: hubning holatini ko'rsatadi."""
+    if m.from_user.id != ADMIN_ID:
+        return
+    n_bc = db.execute("SELECT COUNT(*) FROM bconn").fetchone()[0]
+    owners = db.execute("SELECT owner_id, bot_username, api_key IS NOT NULL FROM owners").fetchall()
+    n_ev = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    await m.answer(
+        f"Business ulanishlari: {n_bc}\n"
+        f"Egalar (id, bot, kalit bormi): {owners}\n"
+        f"Tasdiqlangan to'lovlar: {n_ev}\n"
+        f"Kutilayotgan: {pending_report()}\n"
+        f"XABARKART='{XABARKART}', DEBUG={DEBUG}, muddat={PENDING_MINUTES} daqiqa")
+
+
 @dp.business_message()
 async def biznes(m: Message):
-    r = db.execute("SELECT owner_id FROM bconn WHERE bc_id=?", (m.business_connection_id,)).fetchone()
-    if not r:
-        return
-    owner = r[0]
     u = m.from_user
     text = m.text or m.caption or ""
     uname = (u.username or "").lower() if u else ""
+
+    r = db.execute("SELECT owner_id FROM bconn WHERE bc_id=?", (m.business_connection_id,)).fetchone()
+    if not r:
+        # Business hub o'chiq paytida ulangan bo'lishi mumkin: ulanishni Telegram'dan so'raymiz
+        try:
+            bc = await bot.get_business_connection(m.business_connection_id)
+            if not bc.is_enabled:
+                await verdict("Business ulanishi o'chirilgan.")
+                return
+            db.execute("INSERT OR IGNORE INTO owners(owner_id) VALUES(?)", (bc.user.id,))
+            db.execute("INSERT OR REPLACE INTO bconn VALUES(?,?)", (bc.id, bc.user.id))
+            db.commit()
+            r = (bc.user.id,)
+            await verdict(f"Business ulanishi avtomatik tiklandi (egasi {bc.user.id}).")
+        except Exception as e:
+            await verdict(f"Business ulanishi topilmadi: {e!r}. Chatbots'dan botni olib tashlab, qayta qo'shing.")
+            return
+    owner = r[0]
 
     if DEBUG and owner == ADMIN_ID:  # xabar formatini ko'rish uchun faqat sizga
         try:
@@ -241,16 +291,25 @@ async def biznes(m: Message):
             pass
 
     # faqat Xabarkart botidan kelgan xabarga ishonamiz (soxta "kirim" xabaridan himoya)
-    if not u or not u.is_bot or uname != XABARKART or not active(owner):
+    if not u or not u.is_bot:
+        return                                   # oddiy odamning xabari
+    if uname != XABARKART:
+        await verdict(f"Boshqa bot xabari: @{uname}. Kutilgan Xabarkart: @{XABARKART}. "
+                      f"XABARKART sozlamasini tekshiring.")
+        return
+    if not active(owner):
+        await verdict(f"Egasi {owner} uchun xizmat muddati tugagan: /grant {owner} 30")
         return
     amount = parse_kirim(text)
     if not amount:
+        await verdict("Xabarkart xabari keldi, lekin kirim summasi o'qilmadi (chiqim yoki format boshqa).")
         return
     if db.execute("SELECT 1 FROM done WHERE bc_id=? AND chat_id=? AND msg_id=?",
                   (m.business_connection_id, m.chat.id, m.message_id)).fetchone():
         return
     p = db.execute("SELECT user_id FROM pending WHERE owner_id=? AND amount=? AND exp>?",
                    (owner, amount, time.time())).fetchone()
+    report = None if p else pending_report()     # o'chirishdan oldin
     with db:
         db.execute("INSERT OR IGNORE INTO done VALUES(?,?,?)",
                    (m.business_connection_id, m.chat.id, m.message_id))
@@ -258,10 +317,15 @@ async def biznes(m: Message):
             db.execute("DELETE FROM pending WHERE owner_id=? AND amount=?", (owner, amount))
             db.execute("INSERT INTO events(owner_id,user_id,amount,ts) VALUES(?,?,?,?)",
                        (owner, p[0], amount, time.time()))
+    if p:
+        await verdict(f"✅ Tasdiqlandi: {amount:,} so'm, foydalanuvchi {p[0]}. Mijoz boti 4 soniyada oladi.")
+    else:
+        await verdict(f"❌ Kirim {amount:,} so'm tushdi, lekin mos kutilayotgan summa yo'q. "
+                      f"Kutilayotgan: {report}")
     try:
         if p:
             await bot.send_message(owner, f"💰 Kirim tasdiqlandi: {amount:,} so'm (foydalanuvchi {p[0]})")
-        else:
+        elif owner != ADMIN_ID or not DEBUG:
             await bot.send_message(owner, f"⚠️ Kirim {amount:,} so'm tushdi, lekin kutilayotgan to'lov "
                                           f"topilmadi (muddat tugagan yoki summa boshqa). Qo'lda tekshiring.")
     except Exception:
