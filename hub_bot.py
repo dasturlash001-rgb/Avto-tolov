@@ -10,6 +10,7 @@ O'rnatish:  pip install -U aiogram aiohttp
 Ishga tushirish:  python hub_bot.py
 """
 import asyncio
+import html
 import os
 import random
 import re
@@ -82,14 +83,43 @@ def new_pending(owner_id: int, user_id: int, base: int):
 
 
 def parse_kirim(text: str):
-    """Xabarkart xabaridan kirim summasini oladi. Haqiqiy format ma'lum bo'lgach moslanadi."""
-    if not re.search(r"(?i)(kirim|popolnenie|пополнение|\+)", text):
-        return None
-    m = re.search(r"\+?\s*([\d\s,.]+?)\s*(?:UZS|so'm|сум)", text, re.I)
+    """Xabarkart kirim xabaridan summani oladi.
+    Format: '🟢 Perevod na kartu / ➕ 2 072.00 UZS / 💳 ***2219 / ... / 💵 2 090.01 UZS (qoldiq)'.
+    Faqat ➕ (yoki +) dan keyingi summa olinadi; 💵 qoldiq va ➖ chiqim e'tiborga olinmaydi."""
+    m = re.search(r"[➕+]\s*([\d \u00a0\u202f.,]+?)\s*(?:UZS|so['‘’ʻ`]?m|сум)", text, re.I)
     if not m:
         return None
-    s = re.sub(r"\D", "", m.group(1).split(".")[0].split(",")[0])
-    return int(s) if s else None
+    raw = re.sub(r"[ \u00a0\u202f]", "", m.group(1))
+    raw = re.sub(r"[.,]\d{1,2}$", "", raw)      # tiyin qismini olib tashlaymiz (.00)
+    digits = re.sub(r"\D", "", raw)
+    return int(digits) if digits else None
+
+
+def guide_text(key: str) -> str:
+    """Mijoz botiga qo'shilishi kerak bo'lgan ikkita API so'rovi yo'riqnomasi (HTML)."""
+    e = html.escape
+    topup = e(f"POST {PUBLIC_URL}/api/topup?key={key}&user_id=FOYDALANUVCHI_ID&amount=2000")
+    events = e(f"GET {PUBLIC_URL}/api/events?key={key}&after=OXIRGI_ID")
+    return (
+        "<b>3-qadam. Botingizga avto-to'lovni qo'shing.</b>\n"
+        "Agar botingiz bizning tayyor kodimizda bo'lsa, bu qadam kerak emas: "
+        "adminlardan tayyor faylni oling.\n"
+        "Boshqa kod bo'lsa, botingiz hubga 2 ta so'rov yuborishi kerak "
+        "(shu xabarni dasturchingizga bering):\n\n"
+        "<b>a) Foydalanuvchi «Avtomatik to'lov» ni bosganda</b> — unikal summa olinadi:\n"
+        f"<pre>{topup}</pre>\n"
+        'Javob: <code>{"amount": 2037, "expires_in": ' + str(PENDING_MINUTES * 60) + "}</code>\n"
+        f"Foydalanuvchiga: «Kartaga aynan 2037 so'm o'tkazing, {PENDING_MINUTES} daqiqa ichida» deb yozing. "
+        "Summa aynan shunday bo'lishi shart.\n\n"
+        "<b>b) Har 4 soniyada</b> — tasdiqlangan to'lovlarni so'rang:\n"
+        f"<pre>{events}</pre>\n"
+        'Javob: <code>[{"id": 5, "user_id": 123, "amount": 2037}]</code>\n\n'
+        "<b>c) Har bir yozuv uchun:</b>\n"
+        "1. <code>user_id</code> balansiga <code>amount</code> qo'shing va unga xabar yuboring.\n"
+        "2. Oxirgi <code>id</code> ni saqlang va keyingi so'rovda <code>after</code> ga bering.\n"
+        "3. Bir <code>id</code> ni ikki marta qo'shmang.\n\n"
+        "⚠️ Kalit bor so'rovlarni faqat o'z dasturchingizga bering."
+    )
 
 
 def menu():
@@ -137,6 +167,7 @@ async def get_username(m: Message):
         f"HUB_URL = <code>{PUBLIC_URL}</code>\n"
         f"HUB_KEY = <code>{key}</code>\n\n"
         f"⚠️ Kalitni hech kimga bermang.", parse_mode="HTML")
+    await m.answer(guide_text(key), parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "status")
